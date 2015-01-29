@@ -28,7 +28,7 @@ static unsigned char __pdata irqMaskCtrl;
 static unsigned char __pdata irqMaskIn;
 static unsigned char __pdata irqMaskOut;
 
-static __bit inSuspend;
+__bit inSuspend;
 extern __bit pool_busy;
 static void usb_handler(struct task __xdata *p);
 static struct task __xdata usb_task = {usb_handler, 0, 0, 0};

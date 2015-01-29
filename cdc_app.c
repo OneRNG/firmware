@@ -1,5 +1,5 @@
-#define VERSION 1
-__code char version[] = "\r\nVersion 1\r\n";
+#define VERSION 2
+__code char version[] = "\r\nVersion 2\r\n";
 // (c) Copyright Paul Campbell paul@taniwha.com 2013
 // 
 // This library is free software; you can redistribute it and/or
@@ -422,7 +422,7 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 			setb	EA		//			EA = 1;
 0020$:			ret			//			return;
 0555$:		
-			ljmp	0510$				//		}
+			ljmp	0510$		//		}
 0002$:
 		mov	dptr, #_USBINDEX	//		ep = USBINDEX;
 		movx	a, @dptr

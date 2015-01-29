@@ -23,6 +23,7 @@
 #include "task.h"
 #include "interface.h"
 
+extern __bit inSuspend;
 static task __xdata * __data waitq;
 volatile u8 __data enter_sleep_mod_flag;
 void putstr(char __code *cp);
@@ -315,7 +316,7 @@ void sleep_isr()  __interrupt(5) __naked
 	__endasm;
 }
 
-void putchar(char c)	__naked`
+void putchar(char c)	__naked
 {
 	__asm;
 	push	ACC
@@ -1341,7 +1342,7 @@ m_8:
 				push	acc			
 				anl	_CLKCONSTA, #~0x38	// CLKCONCMD &= ~TICKSPD_MASK;
 
-				mov	_SLEEPCMD, #6 //	SLEEPCMD = PM2
+				mov	_SLEEPCMD, #5 //	SLEEPCMD = PM1
 				setb	EA		//      EA = 1;
 m_81d:				mov 	a, _enter_sleep_mod_flag
 				cjne	a, #1, m_11c    //      while(enter_sleep_mod_flag) 
@@ -1413,12 +1414,16 @@ m_11:						//	} else {
 					anl	_CLKCONSTA, #~0x38	// CLKCONCMD &= ~TICKSPD_MASK;
 
 					lcall 	_start_timer	// 	start_timer(xpt->time);
-					mov	_SLEEPCMD, #6 //	SLEEPCMD = PM2
+					mov	_SLEEPCMD, #5 //	SLEEPCMD = PM1
 					setb	EA		//      EA = 1;
 m_11d:					mov 	a, _enter_sleep_mod_flag
 					cjne	a, #1, m_11c    //      while(enter_sleep_mod_flag) 
-						//lcall	_sleep	//		sleep();
-						lcall	_idle_pool
+#ifdef NOTDEF
+						jnb	_inSuspend, x_idle1
+						lcall	_sleep	//		sleep();
+						sjmp	m_11d
+#endif
+x_idle1:					lcall	_idle_pool
 						sjmp	m_11d
 
 m_11c:						mov	a, _CLKCONSTA	// while ((CLKCONSTA & OSC) != CLKCONCMD_32MHZ);
@@ -1440,8 +1445,12 @@ m_55:
 				setb	EA		//      EA = 1;
 m_11b:				mov 	a, _enter_sleep_mod_flag
 				cjne	a, #1, m_11a    //      while(enter_sleep_mod_flag) 
-					lcall	_idle_pool
-					//lcall	_sleep	//		sleep();
+#ifdef NOTDEF
+					jnb	_inSuspend, x_idle2
+					lcall	_sleep	//		sleep();
+					sjmp	m_11b
+#endif
+x_idle2:				lcall	_idle_pool
 					sjmp	m_11b
 m_11a:				clr	EA	//		EA = 0;
 				lcall	_stop_timer	//	delta = stop_timer();
