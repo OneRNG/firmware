@@ -1,6 +1,6 @@
-#define VERSION 2
-__code char version[] = "\r\nVersion 2\r\n";
-// (c) Copyright Paul Campbell paul@taniwha.com 2013
+#define VERSION 3
+__code char version[] = "\r\nVersion 3\r\n";
+// (c) Copyright Paul Campbell paul@taniwha.com 2013, 2014, 2015
 // 
 // This library is free software; you can redistribute it and/or
 // modify it under the terms of the GNU Lesser General Public
@@ -30,11 +30,11 @@ __code char version[] = "\r\nVersion 2\r\n";
 #define RX_SIZE 250
 #define TX_SIZE 250
 
+extern __xdata task manufacturing_task;	// manufacturing task;
+
 //
 //	UART access USB<->uart
 //
-
-#define POOL_SIZE (7*1024)
 
 unsigned char __xdata pool[POOL_SIZE];
 __xdata unsigned char *__data  pool_in = &pool[0];
@@ -48,6 +48,19 @@ __bit rf_source=0;
 __bit rf_running=0;
 __bit dumping=0;
 __bit versioning=0;
+__bit secret=0;
+__bit IDing=0;
+__bit alt_action=0;
+__bit in_odd=0;
+unsigned char sv;
+extern void start_encrypt();
+extern void send_id_block();
+extern void encrypt_random_block();
+extern void encrypt_token();
+extern void encrypt_secret_blocks();
+extern void sync_header();
+extern unsigned char __xdata token[];
+
 static unsigned char __pdata time_rf_dwell = 0;
 unsigned char __data vind;
 #define MAX_00_S	8
@@ -76,6 +89,19 @@ static __xdata task error_task = {error_thread,0,0,0};
 
 static void rf_thread(task __xdata*t);
 static __xdata task rf_task = {rf_thread,0,0,0};
+
+__bit flv=0;
+__bit flash=0;
+static void flash_thread(task __xdata*t);
+static __xdata task flash_task = {flash_thread,0,0,0};
+void flash_thread(task __xdata*t)
+{
+	if (!flash)
+		return;
+    	P1_1 = flv;				// we use this to signal that the USB is working
+	flv = !flv;				// during manufacturing tests
+	queue_task(&flash_task, HZ/4);
+}
 
 static void
 cpl() __naked
@@ -203,10 +229,15 @@ idle_pool() __naked
 	__asm;						//	for (;; ) {
 0001$:		jb	_no_avalanche, 0200$		//		if (!no_avalanche) {
 		mov	r0, #8				//			for (i = 0; i < 8 i++)
-0003$:							//				v = (v<<1)|p1.7;
-			mov	c, p1.7
+0003$:			mov	c, p1.7			//				v = (v<<1)|p1.7;
 			rlc	a
 			djnz	r0, 0003$
+		mov	r1, a				//			r1 = v;
+		mov	r0, #8				//			for (i = 0; i < 8 i++)
+0033$:			mov	c, p1.7			//				v = (v<<1)|p1.7;
+			rlc	a
+			djnz	r0, 0033$
+		xrl	a, r1				//			v = v^r1;
 		mov	dpl, 	a
 		jnz	0300$				//			if (v == 0) {
 			mov	_num_ffs, #0		//				num_ffs = 0;
@@ -255,7 +286,8 @@ idle_pool() __naked
 			lcall	_queue_pool_data	//			queue_pool_data(v);
 							//		}
 0201$:		mov	a, _enter_sleep_mod_flag	//		if (enter_sleep_mod_flag) break;
-		jnz	0001$
+		jz	0002$
+			ljmp	0001$
 0002$:							//	}
 	ret
 	__endasm;
@@ -352,6 +384,7 @@ set:				// a is 4 bit mask
 				goto set;
 			} else
 			if (a == 'X') {	
+				alt_action = 1;
 				dumping = 1;
 				dump_state = 0;
 				dump_addr = 0x8000;
@@ -365,10 +398,29 @@ set:				// a is 4 bit mask
 			if (a == 'v') {
 				vind = 0;	// version
 				versioning = 1;
+				alt_action = 1;
+			} else 
+			if (a == 'I') {
+				vind = 0;	// extract ID
+				IDing = 1;
+				alt_action = 1;
+			} else 
+			if (a == 'S') {
+				in_state = 10;
+				in_odd = 0;
 			} else 
 			if (a == 'o') {
 				pause = 1;	// pause
 			} else 
+			if (a == 'T') {		// flash for testing - flashes the LED during manufacturing when we're testing the USN
+				flash = !flash;
+				if (flash) {
+					flv = 0;
+					queue_task(&flash_task, 0);
+				} else {
+					cancel_task(&flash_task);
+				}
+			} else
 			if (a == 'w') {		// flush
 				pool_in = &pool[0];
 				pool_out = &pool[0];
@@ -376,8 +428,37 @@ set:				// a is 4 bit mask
 				pool_count=0;
 				pool_busy=0;
 			}
+		} else
+		if (in_state >= 10 && in_state < 26) {	// suck in token
+			if (a >= '0' && a <= '9') {
+				a = a-'0';
+			} else
+			if (a >= 'A' && a <= 'F') {
+				a = a-'A';
+				a = a+10;
+			} else 
+			if (a >= 'a' && a <= 'f') {
+				a = a-'a';
+				a = a+10;
+			} else {
+				goto bad;
+			}
+			if (!in_odd) {
+				sv = a<<4;
+				in_odd = 1;
+			} else {
+				token[in_state-10] = sv|a;
+				in_odd = 0;
+				in_state++;
+			}
+			if (in_state == 26) {
+				vind = 0;	// encrypt secret
+				secret = 1;
+				alt_action = 1;
+				in_state =0;
+			}
 		} else {
-			in_state = 0;
+bad:			in_state = 0;
 		}
 		if (x==1 && !x2) {
 			USBINDEX = 5;
@@ -408,8 +489,7 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 		jnb	_cdcRTS, 0020$		//		if (!cdcRTS) 
 						//			return;
 		clr	EA			//		EA = 0;
-		jb	_dumping, 0002$		//		if (dumping) goto do_dump;
-		jb	_versioning, 0002$	//		if (versioning) goto do_dump;
+		jb	_alt_action, 0002$	//		if (alt_action) goto do_xtra;
 		mov	a, _pool_count+1	//		if (pool_count < 64) {
 		jnz	0002$
 		mov	a, _pool_count
@@ -423,6 +503,7 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 0020$:			ret			//			return;
 0555$:		
 			ljmp	0510$		//		}
+
 0002$:
 		mov	dptr, #_USBINDEX	//		ep = USBINDEX;
 		movx	a, @dptr
@@ -440,11 +521,18 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 			mov	_eventMaskIn, a
 			setb	EA		//			EA = 1;
 			ret			//			return;
-
+						//		}
 1201$:			ljmp 	1200$
-0003$:						//		}
-		jb	_versioning, 1201$	//		if (versioning) goto do_version;
-		jb	_dumping, 0555$		//		if (dumping) goto do_dump;
+6002$:		jnb	_secret, 4202$		//		if (secret) goto do_secret;
+			ljmp	5202$
+4202$:		jnb	_IDing, 4201$		//		if (IDing) goto do_id;
+			ljmp	5201$
+4201$:		jb	_versioning, 1201$	//		if (versioning) goto do_version;
+		jnb	_dumping, 1555$		//		if (dumping) goto do_dump;
+			ljmp	0555$
+1555$:		clr	_alt_action		//		alt_action = 0;
+		
+0003$:		jb	_alt_action, 6002$	//		
 		mov	r2, #64			//		len = 64;
 		clr	c
 		mov	a, _pool_count		//		pool_count -= 64;
@@ -503,7 +591,7 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 	
 0500$:
 	mov	a, _dump_state				//	switch (dump_state) {
-	cjne	a, #13, 0600$				//	case 11:
+	cjne	a, #13, 0575$				//	case 13:
 		mov	a, _dump_page			//		v = *{dump_page,dump_addr};
 		mov	_FMAP, a				
 		mov	dpl, _dump_addr
@@ -515,13 +603,20 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 		mov	_dump_addr, dpl
 		mov	a, dph
 		mov	_dump_addr+1, a			//		if (dump_addr == 0) {
+
+
 		jnz	0570$
 			mov	_dump_addr+1, #0x80	//			dump_addr = 0x800;
 			inc	_dump_page		//			dump_page++;
-			mov	a, _dump_page		//			if (dump_page==8)
-			cjne	a, #8, 0570$		//				dump_state++;
-				inc	_dump_state	// last byte	}
-0570$:		mov	a, r0				//		break;
+			sjmp	0572$			//		}
+0570$: 		cjne	a, #0xff, 0572$			//		if (address == last 128 bytes) 	// hide the 'secret'
+		mov	r3, dpl
+		cjne	r3, #0x80, 0572$
+		mov	r3, _dump_page
+		cjne	r3, #0x7, 0572$
+			inc	_dump_state		// last bytes		dump_state++
+							//		
+0572$:		mov	a, r0				//		break;
 
 0700$:		inc	_DPS				//		// at end of case statement
 		movx	@dptr, a			//	*USBF5 = v;
@@ -529,6 +624,17 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 	djnz	r2, 0500$
 	ljmp	0501$					//	goto send_usb;
 
+0575$: cjne	a, #14, 0600$				//	case 14:
+		mov	dpl, _dump_addr			 //		v = 0xff	// for secret area
+		mov	dph, _dump_addr+1
+		mov	r0, #0xff
+		inc	dptr				//		dump_addr++;
+		mov	_dump_addr, dpl
+		mov	a, dph
+		mov	_dump_addr+1, a			//		if (dump_addr == 0) 
+		jnz	0572$
+			inc	_dump_state		// last byte		dump_state++
+			sjmp	0572$
 
 0600$:	inc	_dump_state				//	case 0:	dump_state++;
 	cjne	a, #0, 0601$
@@ -563,19 +669,19 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 		sjmp	0700$				//		break;
 0610$:	cjne	a, #10, 0611$				//	case 10: dump_state++;
 		mov	a, #VERSION>>8			//		v = VERSION>>8;
-		sjmp	0700$				//		break;
+		ljmp	0700$				//		break;
 0611$:	cjne	a, #11, 0612$				//	case 11: dump_state++;
 		.globl s_CODE
 		.globl l_CODE
 		mov	a, #s_CODE
 		add	a, #l_CODE			//		v = text size;
-		sjmp	0700$				//		break;
+		ljmp	0700$				//		break;
 0612$:	cjne	a, #12, 0613$				//	case 12: dump_state++;
 		mov	a, #s_CODE
 		add	a, #l_CODE
 		mov	a, #s_CODE>>8			
 		addc	a, #l_CODE>>8			//		v = (text size)>>8;
-		sjmp	0700$				//		break;
+		ljmp	0700$				//		break;
 
 0613$:	clr	_dumping				//	default:dumping = 0; 
 	ljmp	0501$					//		goto send_usb;
@@ -599,6 +705,56 @@ pool_rcv_thread(task __xdata*t)	__naked	// woken when pool has new data or USB c
 1202$:
 	clr	_versioning
 	ljmp	0501$					//	goto send_usb;
+5201$:			mov	a, _vind	//	do_id:	switch (vind) {
+			jnz	5705$		//		case 0:
+				inc 	_vind	//			vind = 1;
+				lcall 	_crlf	//			crlf()
+				lcall 	_sync_header//			sync_header()
+				ajmp	0501$	//			break;
+5705$:			cjne    a, #1, 5215$
+				inc 	_vind	//		case 1:	vind = 2;
+				lcall   _send_id_block	//		send_id_block();	// load block
+				ajmp	0501$	//			break;
+5215$:				lcall 	_sync_header//		default:sync_header()
+				lcall 	_crlf	//			crlf()
+				clr	_IDing	//			IDing = 0;
+						//		}
+			ajmp	0501$		//		goto do_usb; // send blocks
+
+5202$:			mov	a, _vind	//	do_secret: switch (vind) {
+			jnz	5207$		//		case 0:
+				inc 	_vind	//			vind = 1;
+				lcall 	_crlf	//			crlf()
+				lcall 	_sync_header//			sync_header()
+				ajmp	0501$	//			break;
+5207$:			cjne	a, #1, 5206$	//		case 1:
+				inc 	_vind	//			vind = 2;
+				lcall	_start_encrypt//		start_encrypt();
+				lcall	_encrypt_random_block//		encrypt_random_block();
+				ajmp	0501$	//			break;
+5206$:			cjne	a, #2, 5203$	//		case 2:
+				inc 	_vind	//			vind = 3;
+				lcall	_encrypt_token//		encrypt_token();
+				ajmp	0501$	//			break;
+5203$:			cjne	a, #3, 5204$	//		case 3:	
+				inc     _vind   //                      vind = 4;
+				lcall 	_sync_header//			sync_header()
+				ajmp    0501$	//			break;
+5204$:			cjne	a, #4, 5205$	//		case 4:	
+				inc     _vind   //                      vind = 5;
+				mov   dptr, #0xff80+32
+				lcall	_encrypt_secret_blocks//	encrypt_secret_blocks(&secret[32]);
+				ajmp    0501$	//			break;
+5205$:			cjne    a, #5, 5214$    //              case 5:
+				inc     _vind   //                      vind = 6;
+				mov   dptr, #0xff80+64	 //	
+				lcall	_encrypt_secret_blocks//	encrypt_secret_blocks(&secret[32]);
+				ajmp    0501$	//			break;
+5214$:				clr	_secret	//		default:secret = 0;
+				lcall 	_sync_header//			sync_header()
+				lcall 	_crlf	//			crlf()
+				ajmp	0501$	//		}
+						//		goto do_usb; // send blocks
 	__endasm;
 }
 
@@ -667,6 +823,7 @@ static void rf_thread(task __xdata*t)
 
 
 
+
 unsigned char my_app(unsigned char op) 
 {
 	switch (op) {
@@ -689,6 +846,7 @@ unsigned char my_app(unsigned char op)
 		FRMCTRL0 = (FRMCTRL0&(3<<2))|(1<<2);	// infinite receive mode
 		queue_task(&error_task, 1*HZ);
 		queue_task(&rf_task, HZ/2);
+		queue_task(&manufacturing_task, 0);
 		break;
 	case APP_GET_MAC:
 		return 0;

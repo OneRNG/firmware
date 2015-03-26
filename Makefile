@@ -58,6 +58,7 @@ endif
 ifdef DRV_DAYLIGHT
 CFLAGS += -DDRV_DAYLIGHT
 endif
+CFLAGS += -DPOOL_SIZE=7168
 LDLIBS_SA = -k $(SDCC_INSTALL_DIR)/lib/medium -l mcs51 -l libsdcc -l libint -l liblong -l libfloat
 LDLIBS = -k $(SDCC_INSTALL_DIR)/lib/medium -l libsdcc -l libint -l liblong -l libfloat
 LDFLAGS_SA = -muwx -b SSEG=0x80 $(LDLIBS_SA) -M -Y -b BSEG=9
@@ -76,12 +77,12 @@ KOBJ += keys.rel
 endif
 
 CFLAGS += -DAPP        
-AOBJ = $(APP_NAME).rel cdc.rel  usb.rel
+AOBJ = $(APP_NAME).rel cdc.rel  usb.rel  validate.rel manufacturing.rel
 APP_REQUIRED=kernel.lk syms.rel app_hdr.rel fixcrc
 #APP_REQUIRED=
 
-all: $(APP_NAME).128k $(APP_NAME).256k
-images: $(APP_NAME).img.128k $(APP_NAME).img.256k
+all: $(APP_NAME).256k
+images: $(APP_NAME).img.256k
 
 $(APP_NAME).128k:	$(APP_NAME).sig.128k $(APP_NAME).img.128k $(APP_NAME).len.sig.128k FFFF
 	cat $(APP_NAME).img.128k $(APP_NAME).len.sig.128k $(APP_NAME).sig.128k FFFF >$(APP_NAME).128k
@@ -163,6 +164,10 @@ cdc.rel:	$(APP_ROOT)/cdc.c  $(KERNEL_ROOT)/include/interface.h
 	$(CC) $(CFLAGS) -c $(APP_ROOT)/cdc.c -o cdc.rel
 usb.rel:	$(APP_ROOT)/usb.c  $(KERNEL_ROOT)/include/interface.h 
 	$(CC) $(CFLAGS) -c $(APP_ROOT)/usb.c -o usb.rel
+validate.rel:   $(APP_ROOT)/validate.c  $(KERNEL_ROOT)/include/interface.h
+	$(CC) $(CFLAGS) -I.. -c $(APP_ROOT)/validate.c -o validate.rel
+manufacturing.rel:   $(APP_ROOT)/manufacturing.c  $(KERNEL_ROOT)/include/interface.h
+	$(CC) $(CFLAGS) -I.. -c $(APP_ROOT)/manufacturing.c -o manufacturing.rel
 
 #
 #	code to automatically build and push new software versions of code to
